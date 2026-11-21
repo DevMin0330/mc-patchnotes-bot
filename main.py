@@ -12,7 +12,7 @@ STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
 
 TOKEN = os.environ["DISCORD_TOKEN"]
-CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로 두고 값만 일반 채널 ID로 바꾸면 됩니다
+CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로, 값은 일반 채널 ID
 API = "https://discord.com/api/v10"
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
@@ -72,7 +72,7 @@ def entry_id(entry):
 
 
 def get_body_html(entry):
-    """피드에 본문이 들어있으면 그걸 쓰고, 없으면 경로를 찾아 따로 가져온다."""
+    """피드에 본문이 있으면 그걸 쓰고, 없으면 경로를 찾아 따로 가져온다."""
     if entry.get("body"):
         return entry["body"]
 
@@ -97,6 +97,12 @@ def get_body_html(entry):
             r = requests.get(url, timeout=30, headers=WEB_HEADERS)
             if r.ok and r.text.strip():
                 print("본문 가져옴:", url)
+                try:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        return data.get("body", "")
+                except ValueError:
+                    pass
                 return r.text
         except requests.RequestException:
             pass
