@@ -9,10 +9,12 @@ import requests
 FEED_URL = "https://launchercontent.mojang.com/v2/javaPatchNotes.json"
 BASE_URL = "https://launchercontent.mojang.com"
 STATE_FILE = "posted.json"
-MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
-TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
+MAX_POSTS_PER_RUN = 5     # 한 번 실행에 최대 몇 개까지 올릴지
+SUMMARIZE = True          # 요약 끄고 싶으면 False (영어 원문 앞부분만 올라감)
+INPUT_CHARS = 10000       # AI에게 보낼 원문 최대 글자 수
+FALLBACK_CHARS = 1500     # AI 실패 시 영어 원문을 몇 글자까지 보여줄지
 
-# 위에서부터 순서대로 시도하고, 한국어 번역이 안 나오면 다음 모델로 넘어갑니다
+# 위에서부터 순서대로 시도하고, 한국어 결과가 안 나오면 다음 모델로 넘어갑니다
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
@@ -30,6 +32,8 @@ HEADERS = {
 }
 WEB_HEADERS = {"User-Agent": "MCPatchNotesBot (personal use, 1.0)"}
 
+
+# ---------------------------------------------------------------- 글자 처리
 
 class HtmlToText(HTMLParser):
     """패치노트 HTML을 디스코드용 마크다운 글자로 바꿔주는 도우미"""
@@ -68,39 +72,45 @@ def html_to_text(html):
     return text.strip()
 
 
-def truncate(text, limit=3800):
+def cut_at_line(text, limit):
+    """limit 글자 안에서 줄이 끊기는 곳까지만 자른다."""
     if len(text) <= limit:
         return text
     cut = text[:limit]
-    cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
-    return cut + "\n\n… (내용이 길어 일부만 표시됩니다)"
+    return cut[: cut.rfind("\n")] if "\n" in cut else cut
 
 
 def is_korean(text):
-    """번역 결과에 한글이 충분히 들어 있는지 검사"""
     hangul = len(re.findall(r"[가-힣]", text))
     letters = len(re.findall(r"[A-Za-z가-힣]", text))
-    return letters > 0 and hangul / letters >= 0.2
+    return letters > 0 and hangul / letters >= 0.1
 
 
-def translate_with_groq(text):
-    """Groq(무료 AI)로 한국어 번역. 한국어 결과가 나오면 번역문, 아니면 None."""
+# ---------------------------------------------------------------- AI 요약
+
+def summarize_with_groq(text):
+    """Groq(무료 AI)로 한국어 요약. 한국어 결과가 나오면 요약문, 아니면 None."""
     if not GROQ_KEY:
-        print("GROQ_API_KEY 가 없어 번역을 건너뜁니다.")
+        print("GROQ_API_KEY 가 없어 요약을 건너뜁니다.")
         return None
 
     system_prompt = (
-        "당신은 마인크래프트 자바 에디션 패치노트 전문 번역가입니다. "
-        "항상 영어를 한국어로 번역해서 한국어로만 답합니다."
+        "당신은 마인크래프트 자바 에디션 패치노트를 한국어로 요약하는 전문가입니다. "
+        "항상 한국어로만 답합니다."
     )
     user_prompt = (
-        "아래 영어 패치노트를 한국어로 번역하세요. 반드시 한국어로 출력해야 합니다.\n"
+        "아래 영어 패치노트를 한국어로 정리하세요. 반드시 한국어로 출력해야 합니다.\n"
         "규칙:\n"
-        "- 마크다운 형식(##, ###, -, **)을 그대로 유지\n"
-        "- 버전 이름, 버그 번호(MC-123456), 코드/명령어는 번역하지 말고 그대로 둠\n"
+        "- 원문이 짧으면 요약하지 말고 그대로 번역\n"
+        "- 원문이 길면 플레이어에게 중요한 내용 위주로 불릿(- ) 5~8개로 요약\n"
+        "- 새 기능, 변경점, 눈에 띄는 버그 수정을 우선하고, 데이터팩/리소스팩/명령어 등 "
+        "기술적인 변경은 한 줄로 묶어서 언급\n"
+        "- 전체 길이는 1200자 이내\n"
+        "- 필요하면 짧은 소제목(### )을 써도 됨\n"
+        "- 버전 이름, 버그 번호(MC-123456), 명령어는 번역하지 말고 그대로 둠\n"
         "- 블록, 몹, 아이템 이름은 한국어판 마인크래프트 공식 명칭 사용\n"
-        "- 설명이나 인사말 없이 번역문만 출력\n\n"
-        "[번역할 영어 원문]\n" + text
+        "- 설명이나 인사말 없이 결과만 출력\n\n"
+        "[영어 원문]\n" + text
     )
 
     for model in GROQ_MODELS:
@@ -111,7 +121,7 @@ def translate_with_groq(text):
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 4096,
+            "max_tokens": 1800,
         }
         try:
             r = requests.post(
@@ -125,17 +135,20 @@ def translate_with_groq(text):
             )
             if not r.ok:
                 print(f"[{model}] 실패 {r.status_code}: {r.text[:200]}")
+                if r.status_code == 429:
+                    time.sleep(10)
                 continue
             result = r.json()["choices"][0]["message"]["content"].strip()
-            print(f"[{model}] 응답 앞부분: {result[:80]!r}")
             if result and is_korean(result):
-                print(f"[{model}] 번역 성공")
+                print(f"[{model}] 요약 성공")
                 return result
-            print(f"[{model}] 한국어가 아니라서 다음 모델로 넘어갑니다.")
+            print(f"[{model}] 한국어가 아니라서 다음 모델로 넘어갑니다. 응답: {result[:60]!r}")
         except Exception as e:
             print(f"[{model}] 오류: {e}")
     return None
 
+
+# ---------------------------------------------------------------- 패치노트 가져오기
 
 def entry_id(entry):
     return str(entry.get("id") or entry.get("version") or entry.get("title"))
@@ -192,35 +205,10 @@ def save_state(ids):
         json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
 
 
-def post_message(entry):
-    title = entry.get("title") or entry.get("version") or "Minecraft 패치노트"
-    original = truncate(html_to_text(get_body_html(entry)), limit=3500)
+# ---------------------------------------------------------------- 디스코드 게시
 
-    description = original
-    footer_text = None
-    if TRANSLATE and original:
-        translated = translate_with_groq(original)
-        if translated:
-            description = truncate(translated, limit=4000)
-            footer_text = "AI(Groq)로 자동 번역됨"
-        else:
-            footer_text = "번역에 실패해 영어 원문으로 표시됩니다"
-
-    embed = {
-        "title": title[:256],
-        "description": description or "본문을 불러오지 못했습니다.",
-        "color": 0x5B8731,
-    }
-    if footer_text:
-        embed["footer"] = {"text": footer_text}
-
-    image = entry.get("image") or {}
-    url = image.get("url")
-    if url:
-        embed["image"] = {"url": BASE_URL + url if url.startswith("/") else url}
-
+def send_embed(embed):
     payload = {"embeds": [embed]}
-
     for _ in range(2):  # 속도 제한에 걸리면 한 번 재시도
         r = requests.post(
             f"{API}/channels/{CHANNEL_ID}/messages",
@@ -232,10 +220,38 @@ def post_message(entry):
             time.sleep(r.json().get("retry_after", 5))
             continue
         break
-
     if not r.ok:
         print("디스코드 오류:", r.status_code, r.text)
         r.raise_for_status()
+
+
+def post_message(entry):
+    title = entry.get("title") or entry.get("version") or "Minecraft 패치노트"
+
+    full_text = html_to_text(get_body_html(entry))
+    source_text = cut_at_line(full_text, INPUT_CHARS)
+
+    summary = summarize_with_groq(source_text) if (SUMMARIZE and source_text) else None
+    if summary:
+        description = summary
+        footer_text = "AI(Groq)가 요약·번역함"
+    else:
+        description = cut_at_line(full_text, FALLBACK_CHARS) or "본문을 불러오지 못했습니다."
+        footer_text = "AI 요약을 쓸 수 없어 영어 원문 일부를 표시합니다"
+
+    embed = {
+        "title": title[:256],
+        "description": description[:4096],
+        "color": 0x5B8731,
+        "footer": {"text": footer_text},
+    }
+
+    image = entry.get("image") or {}
+    img_url = image.get("url")
+    if img_url:
+        embed["image"] = {"url": BASE_URL + img_url if img_url.startswith("/") else img_url}
+
+    send_embed(embed)
     print("게시 완료:", title)
 
 
@@ -267,7 +283,7 @@ def main():
     for entry in reversed(to_post):
         post_message(entry)
         posted.add(entry_id(entry))
-        time.sleep(2)
+        time.sleep(3)
 
     save_state(posted)
     print(f"끝. 새 글 {len(to_post)}개 게시.")
