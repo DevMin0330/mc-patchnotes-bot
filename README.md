@@ -1,0 +1,1 @@
+# mc-patchnotes-bot
