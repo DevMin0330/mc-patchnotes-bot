@@ -12,8 +12,16 @@ STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
 TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
 
+# 위에서부터 순서대로 시도하고, 안 되면 다음 모델로 넘어갑니다
+GEMINI_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+]
+
 TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로, 값은 일반 채널 ID
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 API = "https://discord.com/api/v10"
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
@@ -68,41 +76,46 @@ def truncate(text, limit=3800):
     return cut + "\n\n… (내용이 길어 일부만 표시됩니다)"
 
 
-def translate_line(text):
-    """영어 한 줄을 한국어로. 실패하면 None."""
-    try:
-        r = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "en", "tl": "ko", "dt": "t", "q": text},
-            headers=WEB_HEADERS,
-            timeout=15,
-        )
-        r.raise_for_status()
-        return "".join(part[0] for part in r.json()[0] if part[0])
-    except Exception as e:
-        print("번역 실패:", e)
+def translate_with_gemini(text):
+    """Gemini로 한국어 번역. 성공하면 번역문, 전부 실패하면 None."""
+    if not GEMINI_KEY:
+        print("GEMINI_API_KEY 가 없어 번역을 건너뜁니다.")
         return None
 
+    prompt = (
+        "다음은 마인크래프트 자바 에디션 패치노트(영어)입니다. 자연스러운 한국어로 번역하세요.\n"
+        "규칙:\n"
+        "- 마크다운 형식(##, ###, -, **)을 그대로 유지할 것\n"
+        "- 버전 이름, 버그 번호(MC-123456), 코드/명령어는 번역하지 말고 그대로 둘 것\n"
+        "- 블록, 몹, 아이템 이름은 한국어판 마인크래프트 공식 명칭을 쓸 것\n"
+        "- 설명이나 인사말 없이 번역문만 출력할 것\n\n"
+        "---\n" + text
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
 
-def translate_text(text):
-    """줄 단위로 번역. 제목(##)과 목록(-) 표시는 그대로 유지한다.
-    하나라도 실패하면 (원문, False) 를 돌려준다."""
-    out = []
-    for line in text.split("\n"):
-        m = re.match(r"^(#{1,3} |- )?(.*)$", line)
-        prefix = m.group(1) or ""
-        body = m.group(2).replace("**", "").strip()
-
-        if not re.search(r"[A-Za-z]", body):  # 글자가 없는 줄은 번역하지 않음
-            out.append(line)
-            continue
-
-        translated = translate_line(body)
-        if translated is None:
-            return text, False
-        out.append(prefix + translated)
-        time.sleep(0.3)
-    return "\n".join(out), True
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            r = requests.post(
+                url,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY},
+                json=body,
+                timeout=90,
+            )
+            if not r.ok:
+                print(f"[{model}] 실패 {r.status_code}: {r.text[:200]}")
+                continue
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            result = "".join(p.get("text", "") for p in parts).strip()
+            if result:
+                print(f"[{model}] 번역 성공")
+                return result
+        except Exception as e:
+            print(f"[{model}] 오류: {e}")
+    return None
 
 
 def entry_id(entry):
@@ -162,17 +175,17 @@ def save_state(ids):
 
 def post_message(entry):
     title = entry.get("title") or entry.get("version") or "Minecraft 패치노트"
-    original = truncate(html_to_text(get_body_html(entry)), limit=3000)
+    original = truncate(html_to_text(get_body_html(entry)), limit=3500)
 
+    description = original
     footer_text = None
     if TRANSLATE and original:
-        description, ok = translate_text(original)
-        footer_text = (
-            "Google 번역으로 자동 번역됨" if ok else "번역에 실패해 영어 원문으로 표시됩니다"
-        )
-        description = truncate(description, limit=4000)
-    else:
-        description = original
+        translated = translate_with_gemini(original)
+        if translated:
+            description = truncate(translated, limit=4000)
+            footer_text = "Gemini AI로 자동 번역됨"
+        else:
+            footer_text = "번역에 실패해 영어 원문으로 표시됩니다"
 
     embed = {
         "title": title[:256],
