@@ -24,6 +24,7 @@ jobs:
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           FORUM_CHANNEL_ID: ${{ secrets.FORUM_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: 기록 파일 저장
         run: |
