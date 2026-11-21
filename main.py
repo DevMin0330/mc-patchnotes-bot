@@ -10,9 +10,9 @@ FEED_URL = "https://launchercontent.mojang.com/v2/javaPatchNotes.json"
 BASE_URL = "https://launchercontent.mojang.com"
 STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
-TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
+TRANSLATE = False      # 번역
 
-# 위에서부터 순서대로 시도하고, 안 되면 다음 모델로 넘어갑니다
+# 위에서부터 순서대로 시도 안 되면 다음 모델로
 GEMINI_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
