@@ -10,18 +10,18 @@ FEED_URL = "https://launchercontent.mojang.com/v2/javaPatchNotes.json"
 BASE_URL = "https://launchercontent.mojang.com"
 STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
-TRANSLATE = False      # 번역
+TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
 
-# 위에서부터 순서대로 시도 안 되면 다음 모델로
-GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
+# 위에서부터 순서대로 시도하고, 안 되면 다음 모델로 넘어갑니다
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant",
 ]
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로, 값은 일반 채널 ID
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 API = "https://discord.com/api/v10"
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
@@ -76,40 +76,46 @@ def truncate(text, limit=3800):
     return cut + "\n\n… (내용이 길어 일부만 표시됩니다)"
 
 
-def translate_with_gemini(text):
-    """Gemini로 한국어 번역. 성공하면 번역문, 전부 실패하면 None."""
-    if not GEMINI_KEY:
-        print("GEMINI_API_KEY 가 없어 번역을 건너뜁니다.")
+def translate_with_groq(text):
+    """Groq(무료 AI)로 한국어 번역. 성공하면 번역문, 전부 실패하면 None."""
+    if not GROQ_KEY:
+        print("GROQ_API_KEY 가 없어 번역을 건너뜁니다.")
         return None
 
-    prompt = (
-        "다음은 마인크래프트 자바 에디션 패치노트(영어)입니다. 자연스러운 한국어로 번역하세요.\n"
+    system_prompt = (
+        "당신은 마인크래프트 자바 에디션 패치노트 전문 번역가입니다. "
+        "영어 원문을 자연스러운 한국어로 번역하세요.\n"
         "규칙:\n"
         "- 마크다운 형식(##, ###, -, **)을 그대로 유지할 것\n"
         "- 버전 이름, 버그 번호(MC-123456), 코드/명령어는 번역하지 말고 그대로 둘 것\n"
         "- 블록, 몹, 아이템 이름은 한국어판 마인크래프트 공식 명칭을 쓸 것\n"
-        "- 설명이나 인사말 없이 번역문만 출력할 것\n\n"
-        "---\n" + text
+        "- 설명이나 인사말 없이 번역문만 출력할 것"
     )
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
-    }
 
-    for model in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    for model in GROQ_MODELS:
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4096,
+        }
         try:
             r = requests.post(
-                url,
-                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY},
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_KEY}",
+                    "Content-Type": "application/json",
+                },
                 json=body,
                 timeout=90,
             )
             if not r.ok:
                 print(f"[{model}] 실패 {r.status_code}: {r.text[:200]}")
                 continue
-            parts = r.json()["candidates"][0]["content"]["parts"]
-            result = "".join(p.get("text", "") for p in parts).strip()
+            result = r.json()["choices"][0]["message"]["content"].strip()
             if result:
                 print(f"[{model}] 번역 성공")
                 return result
@@ -180,10 +186,10 @@ def post_message(entry):
     description = original
     footer_text = None
     if TRANSLATE and original:
-        translated = translate_with_gemini(original)
+        translated = translate_with_groq(original)
         if translated:
             description = truncate(translated, limit=4000)
-            footer_text = "Gemini AI로 자동 번역됨"
+            footer_text = "AI(Groq)로 자동 번역됨"
         else:
             footer_text = "번역에 실패해 영어 원문으로 표시됩니다"
 
