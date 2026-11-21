@@ -12,7 +12,7 @@ STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
 TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
 
-# 위에서부터 순서대로 시도하고, 안 되면 다음 모델로 넘어갑니다
+# 위에서부터 순서대로 시도하고, 한국어 번역이 안 나오면 다음 모델로 넘어갑니다
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
@@ -76,20 +76,31 @@ def truncate(text, limit=3800):
     return cut + "\n\n… (내용이 길어 일부만 표시됩니다)"
 
 
+def is_korean(text):
+    """번역 결과에 한글이 충분히 들어 있는지 검사"""
+    hangul = len(re.findall(r"[가-힣]", text))
+    letters = len(re.findall(r"[A-Za-z가-힣]", text))
+    return letters > 0 and hangul / letters >= 0.2
+
+
 def translate_with_groq(text):
-    """Groq(무료 AI)로 한국어 번역. 성공하면 번역문, 전부 실패하면 None."""
+    """Groq(무료 AI)로 한국어 번역. 한국어 결과가 나오면 번역문, 아니면 None."""
     if not GROQ_KEY:
         print("GROQ_API_KEY 가 없어 번역을 건너뜁니다.")
         return None
 
     system_prompt = (
         "당신은 마인크래프트 자바 에디션 패치노트 전문 번역가입니다. "
-        "영어 원문을 자연스러운 한국어로 번역하세요.\n"
+        "항상 영어를 한국어로 번역해서 한국어로만 답합니다."
+    )
+    user_prompt = (
+        "아래 영어 패치노트를 한국어로 번역하세요. 반드시 한국어로 출력해야 합니다.\n"
         "규칙:\n"
-        "- 마크다운 형식(##, ###, -, **)을 그대로 유지할 것\n"
-        "- 버전 이름, 버그 번호(MC-123456), 코드/명령어는 번역하지 말고 그대로 둘 것\n"
-        "- 블록, 몹, 아이템 이름은 한국어판 마인크래프트 공식 명칭을 쓸 것\n"
-        "- 설명이나 인사말 없이 번역문만 출력할 것"
+        "- 마크다운 형식(##, ###, -, **)을 그대로 유지\n"
+        "- 버전 이름, 버그 번호(MC-123456), 코드/명령어는 번역하지 말고 그대로 둠\n"
+        "- 블록, 몹, 아이템 이름은 한국어판 마인크래프트 공식 명칭 사용\n"
+        "- 설명이나 인사말 없이 번역문만 출력\n\n"
+        "[번역할 영어 원문]\n" + text
     )
 
     for model in GROQ_MODELS:
@@ -97,7 +108,7 @@ def translate_with_groq(text):
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
             "max_tokens": 4096,
@@ -116,9 +127,11 @@ def translate_with_groq(text):
                 print(f"[{model}] 실패 {r.status_code}: {r.text[:200]}")
                 continue
             result = r.json()["choices"][0]["message"]["content"].strip()
-            if result:
+            print(f"[{model}] 응답 앞부분: {result[:80]!r}")
+            if result and is_korean(result):
                 print(f"[{model}] 번역 성공")
                 return result
+            print(f"[{model}] 한국어가 아니라서 다음 모델로 넘어갑니다.")
         except Exception as e:
             print(f"[{model}] 오류: {e}")
     return None
