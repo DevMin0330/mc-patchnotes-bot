@@ -12,13 +12,14 @@ STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
 
 TOKEN = os.environ["DISCORD_TOKEN"]
-FORUM_ID = os.environ["FORUM_CHANNEL_ID"]
+CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로 두고 값만 일반 채널 ID로 바꾸면 됩니다
 API = "https://discord.com/api/v10"
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
     "User-Agent": "MCPatchNotesBot (personal use, 1.0)",
     "Content-Type": "application/json",
 }
+WEB_HEADERS = {"User-Agent": "MCPatchNotesBot (personal use, 1.0)"}
 
 
 class HtmlToText(HTMLParser):
@@ -70,6 +71,39 @@ def entry_id(entry):
     return str(entry.get("id") or entry.get("version") or entry.get("title"))
 
 
+def get_body_html(entry):
+    """피드에 본문이 들어있으면 그걸 쓰고, 없으면 경로를 찾아 따로 가져온다."""
+    if entry.get("body"):
+        return entry["body"]
+
+    path = (
+        entry.get("contentPath")
+        or entry.get("bodyPath")
+        or entry.get("content")
+        or entry.get("path")
+    )
+    if not path or not isinstance(path, str):
+        return ""
+
+    if path.startswith("http"):
+        candidates = [path]
+    elif path.startswith("/"):
+        candidates = [BASE_URL + path, BASE_URL + "/v2" + path]
+    else:
+        candidates = [f"{BASE_URL}/v2/{path}", f"{BASE_URL}/{path}"]
+
+    for url in candidates:
+        try:
+            r = requests.get(url, timeout=30, headers=WEB_HEADERS)
+            if r.ok and r.text.strip():
+                print("본문 가져옴:", url)
+                return r.text
+        except requests.RequestException:
+            pass
+    print("본문 경로를 찾지 못함:", path)
+    return ""
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -82,13 +116,13 @@ def save_state(ids):
         json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
 
 
-def post_thread(entry):
+def post_message(entry):
     title = entry.get("title") or entry.get("version") or "Minecraft 패치노트"
-    description = truncate(html_to_text(entry.get("body", "")))
+    description = truncate(html_to_text(get_body_html(entry)))
 
     embed = {
         "title": title[:256],
-        "description": description or "내용이 없습니다.",
+        "description": description or "본문을 불러오지 못했습니다.",
         "color": 0x5B8731,
     }
     image = entry.get("image") or {}
@@ -96,11 +130,11 @@ def post_thread(entry):
     if url:
         embed["image"] = {"url": BASE_URL + url if url.startswith("/") else url}
 
-    payload = {"name": title[:100], "message": {"embeds": [embed]}}
+    payload = {"embeds": [embed]}
 
     for _ in range(2):  # 속도 제한에 걸리면 한 번 재시도
         r = requests.post(
-            f"{API}/channels/{FORUM_ID}/threads",
+            f"{API}/channels/{CHANNEL_ID}/messages",
             headers=HEADERS,
             json=payload,
             timeout=30,
@@ -117,9 +151,12 @@ def post_thread(entry):
 
 
 def main():
-    feed = requests.get(FEED_URL, timeout=30, headers={"User-Agent": "MCPatchNotesBot"})
+    feed = requests.get(FEED_URL, timeout=30, headers=WEB_HEADERS)
     feed.raise_for_status()
     entries = feed.json().get("entries", [])
+
+    if entries:
+        print("피드 항목에 들어있는 키:", list(entries[0].keys()))
 
     # 최신순 정렬 (날짜가 없으면 피드 순서 그대로)
     entries = sorted(entries, key=lambda e: e.get("date", ""), reverse=True)
@@ -131,16 +168,15 @@ def main():
     new_entries = [e for e in entries if entry_id(e) not in posted]
 
     if first_run:
-        # 첫 실행: 과거 글 수백 개가 올라가지 않도록 최신 1개만 올리고 나머지는 '읽음' 처리
         print("첫 실행입니다. 최신 1개만 게시하고 나머지는 기록만 합니다.")
         to_post = new_entries[:1]
         posted.update(entry_id(e) for e in new_entries)
     else:
         to_post = new_entries[:MAX_POSTS_PER_RUN]
 
-    # 오래된 것부터 올려서 포럼에서도 시간순이 되게
+    # 오래된 것부터 올려서 채널에서도 시간순이 되게
     for entry in reversed(to_post):
-        post_thread(entry)
+        post_message(entry)
         posted.add(entry_id(entry))
         time.sleep(2)
 
