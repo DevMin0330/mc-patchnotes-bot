@@ -10,6 +10,7 @@ FEED_URL = "https://launchercontent.mojang.com/v2/javaPatchNotes.json"
 BASE_URL = "https://launchercontent.mojang.com"
 STATE_FILE = "posted.json"
 MAX_POSTS_PER_RUN = 5  # 한 번 실행에 최대 몇 개까지 올릴지
+TRANSLATE = True       # 번역 끄고 싶으면 False 로 바꾸세요
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = os.environ["FORUM_CHANNEL_ID"]  # 이름은 그대로, 값은 일반 채널 ID
@@ -65,6 +66,43 @@ def truncate(text, limit=3800):
     cut = text[:limit]
     cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
     return cut + "\n\n… (내용이 길어 일부만 표시됩니다)"
+
+
+def translate_line(text):
+    """영어 한 줄을 한국어로. 실패하면 None."""
+    try:
+        r = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "en", "tl": "ko", "dt": "t", "q": text},
+            headers=WEB_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return "".join(part[0] for part in r.json()[0] if part[0])
+    except Exception as e:
+        print("번역 실패:", e)
+        return None
+
+
+def translate_text(text):
+    """줄 단위로 번역. 제목(##)과 목록(-) 표시는 그대로 유지한다.
+    하나라도 실패하면 (원문, False) 를 돌려준다."""
+    out = []
+    for line in text.split("\n"):
+        m = re.match(r"^(#{1,3} |- )?(.*)$", line)
+        prefix = m.group(1) or ""
+        body = m.group(2).replace("**", "").strip()
+
+        if not re.search(r"[A-Za-z]", body):  # 글자가 없는 줄은 번역하지 않음
+            out.append(line)
+            continue
+
+        translated = translate_line(body)
+        if translated is None:
+            return text, False
+        out.append(prefix + translated)
+        time.sleep(0.3)
+    return "\n".join(out), True
 
 
 def entry_id(entry):
@@ -124,13 +162,26 @@ def save_state(ids):
 
 def post_message(entry):
     title = entry.get("title") or entry.get("version") or "Minecraft 패치노트"
-    description = truncate(html_to_text(get_body_html(entry)))
+    original = truncate(html_to_text(get_body_html(entry)), limit=3000)
+
+    footer_text = None
+    if TRANSLATE and original:
+        description, ok = translate_text(original)
+        footer_text = (
+            "Google 번역으로 자동 번역됨" if ok else "번역에 실패해 영어 원문으로 표시됩니다"
+        )
+        description = truncate(description, limit=4000)
+    else:
+        description = original
 
     embed = {
         "title": title[:256],
         "description": description or "본문을 불러오지 못했습니다.",
         "color": 0x5B8731,
     }
+    if footer_text:
+        embed["footer"] = {"text": footer_text}
+
     image = entry.get("image") or {}
     url = image.get("url")
     if url:
